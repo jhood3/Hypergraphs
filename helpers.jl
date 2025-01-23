@@ -11,13 +11,14 @@ using NPZ
 using Base.Threads
 using Distances
 using Zygote
-using JuliaFormatter
+
+
 
 function update_theta_all(Theta_IK, Theta_IC, phi_VDK, lambdas_DK, phi_DK, Y_CV, w_KC, MIN_ORDER)
     V = size(Theta_IK, 1)
-    for i = 1:V
+    @views for i = 1:V
         j = min(i+1, V)
-        global Theta_IK, phi_VDK, phi_DK, Theta_IC = update_theta_iC_D(
+        Theta_IK, phi_VDK, phi_DK, Theta_IC = update_theta_iC_D(
             i,
             Theta_IK,
             Theta_IC,
@@ -33,6 +34,7 @@ function update_theta_all(Theta_IK, Theta_IC, phi_VDK, lambdas_DK, phi_DK, Y_CV,
             0,
         )
     end
+    return(Theta_IK, phi_VDK, phi_DK, Theta_IC)
 end
 
 function test_stuff(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, MIN_ORDER)
@@ -42,13 +44,13 @@ function test_stuff(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, MIN
     times_np = convert(Array{Float64}, times)
     llks_np = convert(Array{Float64}, llks)
     npzwrite(
-        "results/" * directory * "/C$(C)K$(K)seed$(seed).npz",
+        "/net/projects/schein-lab/hood/Hypergraphs/results/" * directory * "/C$(C)K$(K)seed$(seed)RR.npz",
         Dict("times" => times_np, "llks" => llks_np),
     )
 end
 
-function evaluate_convergence(s, old_elbo, Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, MIN_ORDER)
-    if s % 5 == 0
+function evaluate_convergence(s, old_elbo, Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, MIN_ORDER, CHECK_EVERY = 10)
+    if s % CHECK_EVERY == 0
         println("Iteration: ", s)
         global likelihood =
             -compute_llk(Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, MIN_ORDER)
@@ -56,6 +58,10 @@ function evaluate_convergence(s, old_elbo, Y_counts_D, Y_indices_D, lambdas_DK, 
         global old_elbo = likelihood
     end
     global s += 1
+end
+
+function gradient(log_likelihood, θ, data)
+    Zygote.gradient(t -> log_likelihood(t, data), θ)[1]
 end
 
 
@@ -70,7 +76,10 @@ end
 function init(K, C, D, V)
     w_KC, log_w_KC = init_W(K, C)
     lambdas_DK = ones(D, K)
-    Theta_IC, Theta_IK, phi_VDK, phi_DK = init_membership(V, C, K, D, w_KC)
+    Theta_IC, Theta_IK = init_membership(V, C, K, D, w_KC)
+    phi_DK, phi_VDK = compute_phi_DK(Theta_IK, D)
+    phi_DK = log.(phi_DK)
+    phi_VDK = log.(phi_VDK)
     return w_KC, log_w_KC, lambdas_DK, Theta_IC, Theta_IK, phi_VDK, phi_DK
 end
 
@@ -140,16 +149,19 @@ function allocate_all(Y_indices_D, Y_counts_D, lambdas_DK, Theta_IK, w_KC, Theta
     K = size(w_KC, 1)
     V = size(Theta_IK, 1)
     Y_CV, Y_KC, Y_DK = reset_Y(D, V, C, K)
-    for d = MIN_ORDER:D
+    locker = Threads.SpinLock()
+    @threads for d = MIN_ORDER:D
         Y_indices = Y_indices_D[d]
         Y_counts = Y_counts_D[d]
         lambdas_K = lambdas_DK[d, :]
         inds_V = inds_VD[d]
         Y_IK = allocate(Y_indices, Y_counts, lambdas_K, Theta_IK)
         Y_CV_raw, Y_KC_raw = reallocate(Y_IK', inds_V, w_KC, Theta_IC)
+        lock(locker)
         Y_CV += Y_CV_raw
         Y_KC += Y_KC_raw
         Y_DK[d, :] = sum(Y_IK, dims = 1)
+        unlock(locker)
     end
     return Y_CV, Y_KC, Y_DK
 end
@@ -193,24 +205,31 @@ function allocate(Y_indices, Y_counts, lambdas_K, Theta_IK)
     return (Y_IK)
 end
 
-function optimize_llk(
-    Y_counts_D,
-    Y_indices_D,
-    lambdas_DK,
-    log_w_KC,
-    Theta_IC,
-    start;
-    lr = 0.0001,
-    steps = 1,
-)
-    for step = 1:steps
-        grad_w_KC = Zygote.gradient(
-            w -> compute_llk(Y_counts_D, Y_indices_D, lambdas_DK, w, Theta_IC, start),
-            log_w_KC,
-        )[1]
-        log_w_KC .-= lr * grad_w_KC
+function gradient(Y_KC, Theta_IC, lambdas_DK, start, log_w_KC)
+    Zygote.gradient(
+        w -> compute_Welbo(Y_KC, w, Theta_IC, lambdas_DK, start),
+        log_w_KC,
+    )[1]
+end
+
+function hessian(Y_KC, Theta_IC, lambdas_DK, start, log_w_KC)
+    g = log_w_KC -> gradient(Y_KC, Theta_IC, lambdas_DK, start, log_w_KC)  # Gradient as a function
+    Zygote.jacobian(g, log_w_KC)  # Use ForwardDiff for second derivatives
+end
+
+function newton_raphson(Y_KC, Theta_IC, lambdas_DK, start, log_w_KC; tol=1e-6, max_iter=1)
+    for i in 1:max_iter
+        #println("Iteration $i: θ = $θ")
+        g = gradient(Y_KC, Theta_IC, lambdas_DK, start, log_w_KC)      # Gradient
+        H = hessian(Y_KC, Theta_IC, lambdas_DK, start, log_w_KC)       # Hessian
+        Δθ = H \ g                                                     # Newton step (H^-1 * g)
+        log_w_KC -= Δθ                                                 # Update parameters
+        
+        # Check for convergence
+        if norm(Δθ) < tol || i == max_iter
+            return log_w_KC
+        end
     end
-    return log_w_KC
 end
 
 function optimize_Welbo(
@@ -236,6 +255,31 @@ function optimize_Welbo(
     end
     return log_w_KC, log.(exp.(log_w_KC) .+ 1)
 end
+
+
+function optimize_WelboAdam(opt,
+    Y_KC,
+    log_w_KC,
+    Theta_IC,
+    lambdas_DK,
+    start,
+    s;
+    steps = 1
+)
+    # Wrap parameters for Flux optimization
+    log_w_KC_param = Flux.params(log_w_KC)
+    for step = 1:steps
+        loss() = compute_Welbo(Y_KC, log_w_KC, Theta_IC, lambdas_DK, start)
+        Flux.Optimise.update!(opt, log_w_KC_param, Zygote.gradient(loss, log_w_KC_param))
+        log_w_KC .= min.(log_w_KC, 1e5)
+        log_w_KC .= max.(log_w_KC, -1e5)
+        log_w_KC[isnan.(log_w_KC)] .= 0
+    end
+
+    # Return the updated log weights and their transformations
+    return log_w_KC, log.(exp.(log_w_KC) .+ 1)
+end
+
 
 function compute_Welbo(Y_KC, log_w_KC, Theta_IC, lambdas_DK, start)
     D = size(lambdas_DK, 1)
@@ -304,129 +348,6 @@ function compute_llk(Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, st
     return -llk
 end
 
-function compute_llk_test(
-    Y_counts_D,
-    Y_indices_D,
-    lambdas_DK,
-    log_w_KC,
-    Theta_IC,
-    start,
-    Y_indices_test_D,
-)
-    w_KC = log.(exp.(log_w_KC) .+ 1)
-    Theta_IK = Theta_IC * w_KC'
-    llk = 0
-    phi_DK = compute_phi_DK_min(Theta_IK, D)
-    llk -= sum(phi_DK[start:D, :] .* lambdas_DK[start:D, :])
-    K = size(Theta_IK, 2)
-    for d = start:D
-        Y_counts = Y_counts_D[d]
-        Y_indices = Y_indices_D[d]
-        Y_indices_test = Y_indices_test_D[d]
-        omit = zeros(size(Y_indices_test, 1), K) .+ log.(lambdas_DK[d, :])'
-        for m = 1:size(Y_indices_test, 2)
-            omit = log.(Theta_IK[Y_indices_test[:, m], :] .+ 1e-20) + omit
-        end
-        llk += sum(exp.(logsumexp(omit, dims = 2)))
-        rates_IK = zeros(size(Y_indices, 1), K) .+ log.(lambdas_DK[d, :])'
-        for m = 1:size(Y_indices, 2)
-            rates_IK = log.(Theta_IK[Y_indices[:, m], :] .+ 1e-20) + rates_IK
-        end
-        llk += sum(logsumexp(rates_IK, dims = 2) .* Y_counts)
-    end
-    return -llk
-    println("Log-likelihood: $(llk)")
-end
-
-
-function allocate_pair(Theta_IC, weights_KC, lambdas_DK, counts, edges, D)
-    K = size(weights_KC, 1)
-    C = size(weights_KC, 2)
-    N = length(counts)
-
-    # Matrix calculations
-    Theta_IK = Theta_IC * weights_KC'
-    Y_NK = zeros(N, K)
-    log_lambdas_K = log.(lambdas_DK[D, :] .+ 1e-20)
-    log_Theta_IC = log.(Theta_IC .+ 1e-20)
-    log_Theta_IK = log.(Theta_IK .+ 1e-20)
-    Y_NK .+= log_lambdas_K'
-
-    # Initialize lambda_aK and log_a
-    lambda_aK = zeros(N, K) .+ log_lambdas_K'
-    log_a = zeros(size(edges, 1), C)
-
-    # Update log_a for each dimension in D
-    for i = 1:D
-        log_a .+= log_Theta_IC[edges[:, i], :]
-    end
-
-    # Compute exp_aK
-    exp_aK = exp.(log_a) * (weights_KC' .^ D) .* exp.(lambda_aK)
-    lambda_aK = exp_aK
-
-    # Update Y_NK for each dimension in D
-    for i = 1:D
-        Y_NK .+= log_Theta_IK[edges[:, i], :]
-    end
-
-    # Compute rates_NK
-    rates_NK = exp.(Y_NK)
-    rates_N = sum(rates_NK, dims = 2)
-    @assert minimum(rates_N) > 0
-    # Compute lambda_dK
-    lambda_dK = rates_NK - lambda_aK
-
-    # Normalize Y_NK
-    Y_NK = exp.(Y_NK .- logsumexp(Y_NK, dims = 2)) .* counts
-
-    # Compute Y_NKa and Y_NKd
-    denominator = lambda_aK .+ lambda_dK
-    denominator[denominator.==0] .= 1e-100
-    Y_NKa = Y_NK .* lambda_aK ./ (denominator)
-    Y_NKd = Y_NK .* lambda_dK ./ (denominator)
-    @assert sum(Y_NK) ≈ sum(counts)
-    @assert sum(Y_NKa) + sum(Y_NKd) ≈ sum(counts)
-    return Y_NK, Y_NKa, Y_NKd
-end
-
-function compute_aggregates(data, Theta_IC, weights_KC, lambdas_DK, K)
-    prop_off_diag = zeros(D)
-    Y_agg_NK = zeros(0, K)
-    Y_agg_NKa = zeros(0, K)
-    Y_agg_NKd = zeros(0, K)
-
-    for i = start:D
-        edges = data["edges"]
-        counts = data["counts"]
-        Dnew = i
-
-        # Filter rows where the number of zeros matches (16 - D)
-        zero_rows = findall(x -> sum(x .== 0) == D - Dnew, eachrow(edges))
-        println("Number of zero rows: $(length(zero_rows))")
-        edges = edges[zero_rows, 1:i]
-        counts = counts[zero_rows]
-
-
-        # Compute pair allocations
-        Y_NK, Y_NKa, Y_NKd =
-            allocate_pair(Theta_IC, weights_KC, lambdas_DK, counts, edges, Dnew)
-
-        # Compute proportion off-diagonal
-        prop_off_diag[i] = sum(Y_NKd) / sum(Y_NK)
-
-        # Aggregate results
-        Y_agg_NK = vcat(Y_agg_NK, Y_NK)
-        Y_agg_NKa = vcat(Y_agg_NKa, Y_NKa)
-        Y_agg_NKd = vcat(Y_agg_NKd, Y_NKd)
-    end
-
-    # Compute aggregate proportion off-diagonal
-    agg_prop_off_diag =
-        sum(Y_agg_NKd[isnan.(Y_agg_NKd).==false]) / sum(Y_agg_NK[isnan.(Y_agg_NK).==false])
-    println("Aggregate Proportion Off-Diagonal: $agg_prop_off_diag")
-    return prop_off_diag
-end
 
 function reallocate(Y_KI, inds_V, weights_KC, Theta_IC)
     V = length(inds_V)
@@ -436,7 +357,6 @@ function reallocate(Y_KI, inds_V, weights_KC, Theta_IC)
     Y_KC = zeros(K, C)
     for i = 1:V
         yi = Y_KI[:, inds_V[i]]
-
         y_ik = dropdims(sum(yi, dims = 2), dims = 2)
         weight_KC = weights_KC .* Theta_IC[i, :]'
         col_sums = sum(weight_KC, dims = 2)
@@ -447,18 +367,6 @@ function reallocate(Y_KI, inds_V, weights_KC, Theta_IC)
     end
     return (Y_CV, Y_KC)
 end
-
-
-
-
-function make_ind_list(Y_indices, V)
-    inds_V = []
-    for i = 1:V
-        push!(inds_V, find_matching_rows(Y_indices, i))
-    end
-    return (inds_V)
-end
-
 
 function init_membership(V, C, K, D, weights_KC)
     Theta_IC = zeros(V, C)
@@ -492,10 +400,10 @@ function init_membership(V, C, K, D, weights_KC)
         end
     end
     for i = 1:V
-        Theta_IK, phi_VDK, phi_DK, Theta_IC =
-            update_theta_iC_init(i, Theta_IK, Theta_IC, phi_VDK, phi_DK, weights_KC)
+        Theta_IK, Theta_IC =
+            update_theta_iC_init(i, Theta_IK, Theta_IC, weights_KC)
     end
-    return (Theta_IC, Theta_IK, phi_VDK, phi_DK)
+    return (Theta_IC, Theta_IK)
 end
 
 
@@ -638,27 +546,13 @@ function update_phi_DVK(theta_k, phi_DK, phi_VDK, j)
 end
 
 
-function update_theta_iC_init(i, Theta_IK, Theta_IC, phi_VDK, phi_DK, weights_KC)
+function update_theta_iC_init(i, Theta_IK, Theta_IC, weights_KC)
     C = size(Theta_IC, 2)
     new_theta_iC = rand(Dirichlet(ones(C) .* 1000))
     new_theta_iK = weights_KC * new_theta_iC
-    old_theta = copy(Theta_IK[i, :])
     Theta_IK[i, :] .= new_theta_iK
-    diff = new_theta_iK .- old_theta
-    phi_DK[1, :] .= logsubexp.(phi_DK[1, :], log.(old_theta))
-    phi_DK[1, :] .= logsumexp.(phi_DK[1, :], log.(new_theta_iK))
-    for d = 2:D
-        phi_DK[d, :] .= logsumexp.(phi_DK[d, :], phi_VDK[i, d-1, :] .+ log.(new_theta_iK))
-        phi_DK[d, :] .= logsubexp.(phi_DK[d, :], phi_VDK[i, d-1, :] .+ log.(old_theta))
-    end
     Theta_IC[i, :] .= new_theta_iC
-    j = i == V ? 1 : i + 1
-    theta_k = Theta_IK[j, :]
-    phi_VDK[j, 1, :] .= logsubexp.(phi_DK[1, :], log.(theta_k))
-    for d = 2:D
-        phi_VDK[j, d, :] .= logsubexp.(phi_DK[d, :], log.(theta_k) .+ phi_VDK[j, d-1, :])
-    end
-    return (Theta_IK, phi_VDK, phi_DK, Theta_IC)
+    return (Theta_IK, Theta_IC)
 end
 
 
