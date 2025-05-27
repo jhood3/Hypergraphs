@@ -13,22 +13,22 @@ using Distances
 using Zygote
 using Plots
 
-function save_params(test, w_KC_best, lambdas_DK_best, Theta_IC_best, times_best, directory, model)
+function save_params(test, w_KC_best, gammas_DK_best, Theta_IC_best, times_best, directory, model)
     if test == false
         w_KC_np = convert(Array{Float64}, w_KC_best)
-        lambdas_DK_np = convert(Array{Float64}, lambdas_DK_best)
+        gammas_DK_np = convert(Array{Float64}, gammas_DK_best)
         Theta_IC_np = convert(Array{Float64}, Theta_IC_best)
         times_np = convert(Array{Float64}, times_best)
         mkpath("results/" * directory)
         if model == "semi"
         npzwrite(
             "results/" * directory * "/C$(C)K$(K)seed$(seed)Params.npz",
-            Dict("w_KC" => w_KC_np, "lambdas_DK" => lambdas_DK_np, "Theta_IC" => Theta_IC_np, "times" => times_np),
+            Dict("w_KC" => w_KC_np, "gammas_DK" => gammas_DK_np, "Theta_IC" => Theta_IC_np, "times" => times_np),
         )
         elseif model == "omni"
             npzwrite(
                 "results/" * directory * "/C$(C)K$(K)seed$(seed)ParamsD.npz",
-                Dict("w_KC" => w_KC_np, "lambdas_DK" => lambdas_DK_np, "Theta_IC" => Theta_IC_np, "times" => times_np),
+                Dict("w_KC" => w_KC_np, "gammas_DK" => gammas_DK_np, "Theta_IC" => Theta_IC_np, "times" => times_np),
             )
         else
             println("Invalid model")
@@ -42,7 +42,7 @@ function softmax(x, dims)
 end
 
 
-function allocate_all_d(Y_indices_D, Y_counts_D, lambdas_DK, Tau_IK, w_KC, Theta_IC, MIN_ORDER, D)
+function allocate_all_d(Y_indices_D, Y_counts_D, gammas_DK, Tau_IK, w_KC, Theta_IC, MIN_ORDER, D)
     C = size(w_KC, 2)
     K = size(w_KC, 1)
     V = size(Tau_IK, 1)
@@ -51,9 +51,9 @@ function allocate_all_d(Y_indices_D, Y_counts_D, lambdas_DK, Tau_IK, w_KC, Theta
     @threads for d = MIN_ORDER:D
         Y_indices = Y_indices_D[d]
         Y_counts = Y_counts_D[d]
-        lambdas_K = lambdas_DK[d, :]
+        gammas_K = gammas_DK[d, :]
         inds_V = inds_VD[d]
-        Y_IK, Y_IKC = allocate_K_d(Tau_IK, w_KC, Y_indices, Y_counts, lambdas_K, Theta_IC)
+        Y_IK, Y_IKC = allocate_K_d(Tau_IK, w_KC, Y_indices, Y_counts, gammas_K, Theta_IC)
         Y_CV_raw = dropdims(sum(Y_IKC, dims = 2), dims=2)'
         Y_KC_raw = dropdims(sum(Y_IKC, dims = 1), dims=1)
         lock(locker)
@@ -65,7 +65,7 @@ function allocate_all_d(Y_indices_D, Y_counts_D, lambdas_DK, Tau_IK, w_KC, Theta
     return Y_CV, Y_KC, Y_DK
 end
 
-function allocate_K_d(Tau_IK, weights_KC, Y_indices, Y_counts, lambdas_K, Theta_IC)
+function allocate_K_d(Tau_IK, weights_KC, Y_indices, Y_counts, gammas_K, Theta_IC)
     I = size(Tau_IK, 1)
     K = size(Tau_IK, 2)
     C = size(weights_KC, 2)
@@ -82,7 +82,7 @@ function allocate_K_d(Tau_IK, weights_KC, Y_indices, Y_counts, lambdas_K, Theta_
     sub_IK = Y_IC * w_KC_d'
     Y_IK[:, (C+1):K] .-= sub_IK[:, (C+1):K]
     Y_IK .= max.(Y_IK, 1e-300)
-    Y_IK .*= lambdas_K'
+    Y_IK .*= gammas_K'
     Y_IK ./= sum(Y_IK, dims = 2)
     Y_IK .*= Y_counts
     Y_IKC = zeros(I, K, C)
@@ -132,14 +132,14 @@ function allocate_iCK(Tau_IK, weights_KC, Theta_IC, count_K, index, w_KC_d, l_w_
     return(y_dKC)
 end
 
-function update_theta_iC_d(i, Y_iC, lambda_DK, weights_KC, start, D, phi_vDK, beta)
+function update_theta_iC_d(i, Y_iC, gamma_DK, weights_KC, start, D, phi_vDK, beta)
     numerator_C = Y_iC
     phi_vDC = phi_vDK[:, 1:C]
-    d_val_sum = sum(lambda_DK[start:D, :] .* phi_vDK[(start-1):(D-1),:], dims=1)
+    d_val_sum = sum(gamma_DK[start:D, :] .* phi_vDK[(start-1):(D-1),:], dims=1)
     denominators_C = (d_val_sum * weights_KC)'
     
     @views for d in start:D
-        term_KC = lambda_DK[d, :] .* weights_KC
+        term_KC = gamma_DK[d, :] .* weights_KC
         w_KC_d = weights_KC .^ (d-1)
         wp_KC = w_KC_d .* phi_vDC[d-1, :]'
         term_KC .*= wp_KC
@@ -155,7 +155,7 @@ function update_theta_iC_D_d(
     Tau_IK,
     Theta_IC,
     phi_VDK,
-    lambdas_DK,
+    gammas_DK,
     phi_DK,
     Y_C,
     weights_KC,
@@ -166,7 +166,7 @@ function update_theta_iC_D_d(
     iter,
 )
     old_theta = Tau_IK[i, :]
-    new_theta_iC = update_theta_iC_d(i, Y_C .+ alpha, lambdas_DK, weights_KC, start, size(phi_DK, 1), exp.(phi_VDK[i,:,:]), beta)
+    new_theta_iC = update_theta_iC_d(i, Y_C .+ alpha, gammas_DK, weights_KC, start, size(phi_DK, 1), exp.(phi_VDK[i,:,:]), beta)
     new_theta_iC = max.(new_theta_iC, alpha)
     # Update theta values
     new_Tau_IK = weights_KC * new_theta_iC
@@ -178,7 +178,7 @@ function update_theta_iC_D_d(
 end
 
 
-function update_theta_all_d(Tau_IK, Theta_IC, phi_VDK, lambdas_DK, phi_DK, Y_CV, w_KC, MIN_ORDER)
+function update_theta_all_d(Tau_IK, Theta_IC, phi_VDK, gammas_DK, phi_DK, Y_CV, w_KC, MIN_ORDER)
     V = size(Tau_IK, 1)
     @views for i = 1:V
         j = min(i+1, V)
@@ -187,7 +187,7 @@ function update_theta_all_d(Tau_IK, Theta_IC, phi_VDK, lambdas_DK, phi_DK, Y_CV,
             Tau_IK,
             Theta_IC,
             phi_VDK,
-            lambdas_DK,
+            gammas_DK,
             phi_DK,
             Y_CV[:, i],
             w_KC,
@@ -203,9 +203,9 @@ function update_theta_all_d(Tau_IK, Theta_IC, phi_VDK, lambdas_DK, phi_DK, Y_CV,
     return(Tau_IK, phi_VDK, phi_DK, Theta_IC)
 end
 
-function compute_gradient_d(log_w_KC, Y_KC, Theta_IC, lambdas_DK, start, D)
+function compute_gradient_d(log_w_KC, Y_KC, Theta_IC, gammas_DK, start, D)
     return Zygote.gradient(
-        w -> compute_Welbo_d(Y_KC, w, Theta_IC, lambdas_DK[start:D,:], start, D),
+        w -> compute_Welbo_d(Y_KC, w, Theta_IC, gammas_DK[start:D,:], start, D),
         log_w_KC
     )[1]
 end
@@ -214,7 +214,7 @@ function optimize_Welbo_d(
     Y_KC,
     log_w_KC,
     Theta_IC,
-    lambdas_DK,
+    gammas_DK,
     start,
     D,
     s,
@@ -223,7 +223,7 @@ function optimize_Welbo_d(
 )
 grad_w_KC = zeros(size(log_w_KC))
 for step = 1:steps
-    grad_w_KC .= compute_gradient_d(log_w_KC, Y_KC, Theta_IC, lambdas_DK, start, D)
+    grad_w_KC .= compute_gradient_d(log_w_KC, Y_KC, Theta_IC, gammas_DK, start, D)
     @inbounds grad_w_KC = clamp.(grad_w_KC, -1e5, 1e5)
     @inbounds grad_w_KC[isnan.(grad_w_KC)] .= 0
     log_w_KC[(C+1):K,:] .+= lr * grad_w_KC[(C+1):K,:]
@@ -231,30 +231,30 @@ end
     return log_w_KC, softmax(log_w_KC, 2)#log.(exp.(log_w_KC) .+ 1) 
 end
 
-function compute_Welbo_d(Y_KC, log_w_KC, Theta_IC, lambdas_DK, start, D)
+function compute_Welbo_d(Y_KC, log_w_KC, Theta_IC, gammas_DK, start, D)
     #w_KC = log1p.(exp.(log_w_KC))  # log(1 + exp(x)) is equivalent
-    w_KC = softmax(log_w_KC, 2) #under softmax formulation: straighten out later
+    w_KC = softmax(log_w_KC, 2) #under softmax formulation
     phi_DK = compute_phi_DK_min(Theta_IC * w_KC', D)
     phi_DK_sub = phi_DK[start:D, :]
     llk = sum(Y_KC .* log.(w_KC))
-    llk -= sum(phi_DK_sub .* lambdas_DK)
+    llk -= sum(phi_DK_sub .* gammas_DK)
     for d in 1:(D-start + 1) #problem; re-evaluate
-        llk += sum(lambdas_DK[d,(C+1):K] .* dropdims(sum(w_KC[(C+1):K, :].^(d+ start-1) .* phi_DK_sub[d, 1:C]', dims=2), dims=2))
+        llk += sum(gammas_DK[d,(C+1):K] .* dropdims(sum(w_KC[(C+1):K, :].^(d+ start-1) .* phi_DK_sub[d, 1:C]', dims=2), dims=2))
     end
     return llk
 end
 
 
-function compute_llk_d(Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, start)
+function compute_llk_d(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, start)
     C = size(Theta_IC, 2)
     #w_KC = log1p.(exp.(log_w_KC))
     w_KC = softmax(log_w_KC, 2)
     Tau_IK = Theta_IC * w_KC'
     llk = 0
     phi_DK = compute_phi_DK_min(Tau_IK, D)
-    llk -= sum(phi_DK[start:D, :] .* lambdas_DK[start:D, :])
+    llk -= sum(phi_DK[start:D, :] .* gammas_DK[start:D, :])
     for d in start:D
-        llk += sum(lambdas_DK[d,(C+1):K] .* dropdims(sum(w_KC[(C+1):K, :].^d .* phi_DK[d, 1:C]', dims=2), dims=2))
+        llk += sum(gammas_DK[d,(C+1):K] .* dropdims(sum(w_KC[(C+1):K, :].^d .* phi_DK[d, 1:C]', dims=2), dims=2))
     end
     for d = start:D
         Y_counts = Y_counts_D[d]
@@ -268,14 +268,14 @@ function compute_llk_d(Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, 
             rates_IK[:, k] .-= dropdims(sum(rates_IK[:, 1:C] .* w_KC[k, :]'.^d, dims=2), dims=2)
         end
         rates_IK .= max.(rates_IK, 0)
-        rates_IK .= log.(rates_IK.+1e-80) .+ log.(lambdas_DK[d, :])'
+        rates_IK .= log.(rates_IK.+1e-80) .+ log.(gammas_DK[d, :])'
         llk += sum(logsumexp(rates_IK, dims = 2) .* Y_counts)
     end
     println("Log-likelihood: $(llk)")
     return llk
 end
 
-function make_predictions_d(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Tau_IK, start, w_KC)
+function make_predictions_d(Y_indices_test_D, Y_counts_test_D, gammas_DK, Tau_IK, start, w_KC)
     D = length(Y_indices_test_D)
     predictions = zeros(0)
     log_pmf = zeros(0)
@@ -298,7 +298,7 @@ function make_predictions_d(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Tau_I
             diff = dropdims(sum(w_KC_d[k, :]' .* rates_IK[:, 1:C], dims = 2), dims = 2)
             rates_IK[:, k] .-= diff
         end
-        rates_IK .*= lambdas_DK[d, :]'
+        rates_IK .*= gammas_DK[d, :]'
         predictions_d = sum(rates_IK, dims = 2)
         predictions_d = max.(predictions_d, 0)
         prob_greater_0_d = 1 .- exp.(-predictions_d)
@@ -319,7 +319,7 @@ function make_predictions_d(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Tau_I
     return log_pmfs, aucs
 end
 
-function update_theta_all(Theta_IK, Theta_IC, phi_VDK, lambdas_DK, phi_DK, Y_CV, w_KC, MIN_ORDER)
+function update_theta_all(Theta_IK, Theta_IC, phi_VDK, gammas_DK, phi_DK, Y_CV, w_KC, MIN_ORDER)
     V = size(Theta_IK, 1)
     @views for i = 1:V
         j = min(i+1, V)
@@ -328,7 +328,7 @@ function update_theta_all(Theta_IK, Theta_IC, phi_VDK, lambdas_DK, phi_DK, Y_CV,
             Theta_IK,
             Theta_IC,
             phi_VDK,
-            lambdas_DK,
+            gammas_DK,
             phi_DK,
             Y_CV[:, i],
             w_KC,
@@ -344,11 +344,11 @@ function update_theta_all(Theta_IK, Theta_IC, phi_VDK, lambdas_DK, phi_DK, Y_CV,
     return(Theta_IK, phi_VDK, phi_DK, Theta_IC)
 end
 
-function test_stuff(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, w_KC, MIN_ORDER, model, save_auc = false)
+function test_stuff(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, w_KC, MIN_ORDER, model, save_auc = false)
     if model == "omni"
-        log_pmf, auc = make_predictions_d(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, MIN_ORDER, w_KC)
+        log_pmf, auc = make_predictions_d(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, MIN_ORDER, w_KC)
     elseif model == "semi"
-        log_pmf, auc = make_predictions(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, MIN_ORDER)
+        log_pmf, auc = make_predictions(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, MIN_ORDER)
     else
         println("Invalid model")
     end
@@ -374,13 +374,13 @@ function test_stuff(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, w_K
     end
 end
 
-function evaluate_convergence(s, old_elbo, Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, MIN_ORDER, model, CHECK_EVERY = 10)
+function evaluate_convergence(s, old_elbo, Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, MIN_ORDER, model, CHECK_EVERY = 10)
     if s % CHECK_EVERY == 0
         println("Iteration: ", s)
         if model == "omni"
-            global likelihood = compute_llk_d(Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, MIN_ORDER)
+            global likelihood = compute_llk_d(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, MIN_ORDER)
         elseif model == "semi"
-            global likelihood = compute_llk(Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, MIN_ORDER)
+            global likelihood = compute_llk(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, MIN_ORDER)
         else
             println("Invalid model")
         end
@@ -400,14 +400,14 @@ function reset_Y(D, V, C, K)
 end
 
 function init(K, C, D, V)
-    w_KC, log_w_KC = init_W(K, C) #make log_w_KC inverse softmax of w_KC
+    w_KC, log_w_KC = init_W(K, C) 
     init_W_KC = copy(w_KC)
-    log_w_KC = log.(w_KC)# - log.(1 .- w_KC)
-    lambdas_DK = ones(D, K)
+    log_w_KC = log.(w_KC)
+    gammas_DK = ones(D, K)
     Theta_IC, Theta_IK = init_membership(V, C, K, D, w_KC)
     Theta_IC = Theta_IC ./ sum(Theta_IC) .* V/C
     Theta_IK, phi_DK, phi_VDK = update_params(Theta_IC, w_KC, D)
-    return w_KC, init_W_KC, log_w_KC, lambdas_DK, Theta_IC, Theta_IK, phi_VDK, phi_DK
+    return w_KC, init_W_KC, log_w_KC, gammas_DK, Theta_IC, Theta_IK, phi_VDK, phi_DK
 end
 
 function load_data(directory, MAX_ORDER = 25, MIN_ORDER = 2, test = false)
@@ -473,7 +473,7 @@ function update_params(Theta_IC, w_KC, D)
 end
 
 
-function allocate_all(Y_indices_D, Y_counts_D, lambdas_DK, Theta_IK, w_KC, Theta_IC, MIN_ORDER, D)
+function allocate_all(Y_indices_D, Y_counts_D, gammas_DK, Theta_IK, w_KC, Theta_IC, MIN_ORDER, D)
     C = size(w_KC, 2)
     K = size(w_KC, 1)
     V = size(Theta_IK, 1)
@@ -482,9 +482,9 @@ function allocate_all(Y_indices_D, Y_counts_D, lambdas_DK, Theta_IK, w_KC, Theta
     for d = MIN_ORDER:D
         Y_indices = Y_indices_D[d]
         Y_counts = Y_counts_D[d]
-        lambdas_K = lambdas_DK[d, :]
+        gammas_K = gammas_DK[d, :]
         inds_V = inds_VD[d]
-        Y_IK = allocate(Y_indices, Y_counts, lambdas_K, Theta_IK)
+        Y_IK = allocate(Y_indices, Y_counts, gammas_K, Theta_IK)
         Y_CV_raw, Y_KC_raw = reallocate(Y_IK', inds_V, w_KC, Theta_IC)
         lock(locker)
         Y_CV += Y_CV_raw
@@ -513,10 +513,10 @@ function init_W(K, C)
 end
 
 
-function allocate(Y_indices, Y_counts, lambdas_K, Theta_IK)
+function allocate(Y_indices, Y_counts, gammas_K, Theta_IK)
     I = size(Theta_IK, 1)
     K = size(Theta_IK, 2)
-    Y_IK = zeros(size(Y_indices, 1), K) .+ log.(lambdas_K)'
+    Y_IK = zeros(size(Y_indices, 1), K) .+ log.(gammas_K)'
     for d in axes(Y_indices, 2)
         Y_IK += log.(Theta_IK[Y_indices[:, d], :])
     end
@@ -525,9 +525,9 @@ function allocate(Y_indices, Y_counts, lambdas_K, Theta_IK)
     return (Y_IK)
 end
 
-function gradient(Y_KC, Theta_IC, lambdas_DK, start, log_w_KC)
+function gradient(Y_KC, Theta_IC, gammas_DK, start, log_w_KC)
     Zygote.gradient(
-        w -> compute_Welbo(Y_KC, w, Theta_IC, lambdas_DK[start:D,:], start),
+        w -> compute_Welbo(Y_KC, w, Theta_IC, gammas_DK[start:D,:], start),
         log_w_KC,
     )[1]
 end
@@ -536,9 +536,9 @@ end
 
 
 
-function compute_gradient(log_w_KC, Y_KC, Theta_IC, lambdas_DK, start, D)
+function compute_gradient(log_w_KC, Y_KC, Theta_IC, gammas_DK, start, D)
     return Zygote.gradient(
-        w -> compute_Welbo(Y_KC, w, Theta_IC, lambdas_DK[start:D,:], start, D),
+        w -> compute_Welbo(Y_KC, w, Theta_IC, gammas_DK[start:D,:], start, D),
         log_w_KC
     )[1]
 end
@@ -549,7 +549,7 @@ function optimize_Welbo(
     Y_KC,
     log_w_KC,
     Theta_IC,
-    lambdas_DK,
+    gammas_DK,
     start,
     D,
     s,
@@ -558,7 +558,7 @@ function optimize_Welbo(
 )
 grad_w_KC = zeros(size(log_w_KC))
 for step = 1:steps
-    grad_w_KC .= compute_gradient(log_w_KC, Y_KC, Theta_IC, lambdas_DK, start, D)
+    grad_w_KC .= compute_gradient(log_w_KC, Y_KC, Theta_IC, gammas_DK, start, D)
     @inbounds grad_w_KC = clamp.(grad_w_KC, -1e5, 1e5)
     @inbounds grad_w_KC[isnan.(grad_w_KC)] .= 0
     log_w_KC .+= lr * grad_w_KC
@@ -568,12 +568,12 @@ end
 
 
 
-function compute_Welbo(Y_KC, log_w_KC, Theta_IC, lambdas_DK, start, D)
+function compute_Welbo(Y_KC, log_w_KC, Theta_IC, gammas_DK, start, D)
     w_KC = softmax(log_w_KC, 2)#log1p.(exp.(log_w_KC))  # log(1 + exp(x)) is equivalent
     phi_DK = compute_phi_DK_min(Theta_IC * w_KC', D)
     phi_DK_sub = phi_DK[start:D, :]
     llk = sum(Y_KC .* log.(w_KC))
-    llk -= sum(phi_DK_sub .* lambdas_DK)
+    llk -= sum(phi_DK_sub .* gammas_DK)
     return llk
 end
 
@@ -618,16 +618,16 @@ end
 
 
 
-function compute_llk(Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, start)
+function compute_llk(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, start)
     w_KC = softmax(log_w_KC, 2)#log1p.(exp.(log_w_KC))
     Theta_IK = Theta_IC * w_KC'
     llk = 0
     phi_DK = compute_phi_DK_min(Theta_IK, D)
-    llk -= sum(phi_DK[start:D, :] .* lambdas_DK[start:D, :])
+    llk -= sum(phi_DK[start:D, :] .* gammas_DK[start:D, :])
     for d = start:D
         Y_counts = Y_counts_D[d]
         Y_indices = Y_indices_D[d]
-        rates_IK = zeros(size(Y_indices, 1), K) .+ log.(lambdas_DK[d, :])'
+        rates_IK = zeros(size(Y_indices, 1), K) .+ log.(gammas_DK[d, :])'
         for m = 1:size(Y_indices, 2)
             rates_IK .+= log.(Theta_IK[Y_indices[:, m], :])# + rates_IK
         end
@@ -702,7 +702,7 @@ function update_theta_iC_D(
     Theta_IK,
     Theta_IC,
     phi_VDK,
-    lambdas_DK,
+    gammas_DK,
     phi_DK,
     Y_C,
     weights_KC,
@@ -718,7 +718,7 @@ function update_theta_iC_D(
     exp_phi_VDK = exp.(phi_VDK[i, (start-1):(size(phi_DK, 1)-1), :])
 
     # Efficient sum computation of d_val
-    d_val_sum = sum(lambdas_DK[start:size(phi_DK, 1), :] .* exp_phi_VDK, dims=1)
+    d_val_sum = sum(gammas_DK[start:size(phi_DK, 1), :] .* exp_phi_VDK, dims=1)
 
     # Compute denominators and new_theta_iC
     denominators = d_val_sum * weights_KC
@@ -778,7 +778,7 @@ function holdout(Y_indices_D, Y_counts_D, start, V)
     return Y_indices_test_D, Y_counts_test_D, Y_indices_train_D, Y_counts_train_D
 end
 
-function make_predictions(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, start)
+function make_predictions(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, start)
     D = length(Y_indices_D)
     predictions = zeros(0)
     log_pmf = zeros(0)
@@ -790,7 +790,7 @@ function make_predictions(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_I
     for d = start:D
         Y_indices = Y_indices_test_D[d]
         Y_counts = Y_counts_test_D[d]
-        rates_IK = zeros(size(Y_indices, 1), K) .+ log.(lambdas_DK[d, :])'
+        rates_IK = zeros(size(Y_indices, 1), K) .+ log.(gammas_DK[d, :])'
         for m = 1:d
             rates_IK += log.(Theta_IK[Y_indices[:, m], :])
         end
@@ -859,25 +859,25 @@ function find_matching_rows(Y_IK, i_prime)
     return true_vals
 end
 
-function update_lambda_DK(lambdas_DK, y_DK, phi_DK, alpha = 1e-2, beta = 1e-2)
-    lambdas_DK = (y_DK .+ alpha) ./ (exp.(phi_DK) .+ beta)
-    return (lambdas_DK)
+function update_gamma_DK(gammas_DK, y_DK, phi_DK, alpha = 1e-2, beta = 1e-2)
+    gammas_DK = (y_DK .+ alpha) ./ (exp.(phi_DK) .+ beta)
+    return (gammas_DK)
 end
 
-function update_lambda_DK_d(Y_DK, phi_DK, start, weights_KC, alpha, beta)
+function update_gamma_DK_d(Y_DK, phi_DK, start, weights_KC, alpha, beta)
     D = size(phi_DK, 1)
     K = size(phi_DK, 2)
     e_phi_DK = exp.(phi_DK)
-    lambdas_DK = ones(D, K)
+    gammas_DK = ones(D, K)
     C = size(weights_KC, 2)
     for d in start:D
         for k in 1:K
             if k <= C
-            lambdas_DK[d, k] = (Y_DK[d,k] + alpha) / (e_phi_DK[d,k] + beta)
+            gammas_DK[d, k] = (Y_DK[d,k] + alpha) / (e_phi_DK[d,k] + beta)
             else
-                lambdas_DK[d, k] = (Y_DK[d,k] + alpha) / max((e_phi_DK[d,k]+ beta - sum(e_phi_DK[d, 1:C] .* weights_KC[k, :].^d)), beta)
+                gammas_DK[d, k] = (Y_DK[d,k] + alpha) / max((e_phi_DK[d,k]+ beta - sum(e_phi_DK[d, 1:C] .* weights_KC[k, :].^d)), beta)
             end
         end
     end
-    return(lambdas_DK)
+    return(gammas_DK)
 end
