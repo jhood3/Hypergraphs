@@ -1,22 +1,21 @@
 include("utils.jl")
 directory = "supreme-court"
-test = false
+test = false #if true, masks proportion of data as described in paper
 C = 3
 K = 6
-full = false
-model = "normal" #"normal" (faster) or "D" (slower but more flexible) 
-MIN_ORDER = 4
-MAX_ORDER = 9
+model = "semi" #"semi" (faster) or "omni" (slower but more flexible) 
+MIN_ORDER = 2
+MAX_ORDER = 9 #D in paper
 CONV_TOL = 1 
 MAX_ITER = 1000
 LEARNING_RATE = 1e-5
 NUM_RESTARTS = 10
-NUM_STEPS = 10
+NUM_STEPS = 1 #steps of gradient ascent per iteration: set to 1 by default
 CHECK_EVERY = 10
 seed = 123
 Random.seed!(seed) 
 
-@assert model == "normal" || model == "D" "model must be 'normal' or 'D'"
+@assert model == "semi" || model == "omni" "model must be 'semi' or 'omni'"
 
 ###---------------------------------------------------LOAD DATA---------------------------------------------------
 
@@ -40,7 +39,7 @@ for i in 1:NUM_RESTARTS
     ###---------------------------------------------------TRAINING---------------------------------------------------
     while (s <= MAX_ITER && change_elbo > CONV_TOL)
         start_time = time()
-        if model =="D"
+        if model =="omni"
             Y_CV, Y_KC, Y_DK = allocate_all_d(Y_indices_D, Y_counts_D, lambdas_DK, Theta_IK, w_KC, Theta_IC, MIN_ORDER, D)
             lambdas_DK = update_lambda_DK_d(Y_DK, phi_DK, MIN_ORDER, w_KC, 0, 0)
             Theta_IK, phi_VDK, phi_DK, Theta_IC = update_theta_all_d(Theta_IK, Theta_IC, phi_VDK, lambdas_DK, phi_DK, Y_CV, w_KC, MIN_ORDER)

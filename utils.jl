@@ -20,12 +20,12 @@ function save_params(test, w_KC_best, lambdas_DK_best, Theta_IC_best, times_best
         Theta_IC_np = convert(Array{Float64}, Theta_IC_best)
         times_np = convert(Array{Float64}, times_best)
         mkpath("results/" * directory)
-        if model == "normal"
+        if model == "semi"
         npzwrite(
             "results/" * directory * "/C$(C)K$(K)seed$(seed)Params.npz",
             Dict("w_KC" => w_KC_np, "lambdas_DK" => lambdas_DK_np, "Theta_IC" => Theta_IC_np, "times" => times_np),
         )
-        elseif model == "D"
+        elseif model == "omni"
             npzwrite(
                 "results/" * directory * "/C$(C)K$(K)seed$(seed)ParamsD.npz",
                 Dict("w_KC" => w_KC_np, "lambdas_DK" => lambdas_DK_np, "Theta_IC" => Theta_IC_np, "times" => times_np),
@@ -71,7 +71,6 @@ function allocate_K_d(Tau_IK, weights_KC, Y_indices, Y_counts, lambdas_K, Theta_
     C = size(weights_KC, 2)
     D = size(Y_indices, 2)
     Y_IK = zeros(size(Y_indices, 1), K)
-    #set minimum tau_ik to 1e-300
     Tau_IK = max.(Tau_IK, 1e-300)
     for d in axes(Y_indices, 2)
         Y_IK .+= log.(Tau_IK[Y_indices[:, d], :])
@@ -346,9 +345,9 @@ function update_theta_all(Theta_IK, Theta_IC, phi_VDK, lambdas_DK, phi_DK, Y_CV,
 end
 
 function test_stuff(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, w_KC, MIN_ORDER, model, save_auc = false)
-    if model == "D"
+    if model == "omni"
         log_pmf, auc = make_predictions_d(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, MIN_ORDER, w_KC)
-    elseif model == "normal"
+    elseif model == "semi"
         log_pmf, auc = make_predictions(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, MIN_ORDER)
     else
         println("Invalid model")
@@ -360,12 +359,12 @@ function test_stuff(Y_indices_test_D, Y_counts_test_D, lambdas_DK, Theta_IK, w_K
     end
     times_np = convert(Array{Float64}, times)
     heldout_llk_D_np = convert(Array{Float64}, heldout_llk_D)
-    if model == "D"
+    if model == "omni"
         npzwrite(
             "results/" * directory * "/C$(C)K$(K)seed$(seed)RRD.npz",
             Dict("times" => times_np, "llks" => heldout_llk_D_np),
         )
-    elseif model == "normal"
+    elseif model == "semi"
         npzwrite(
             "results/" * directory * "/C$(C)K$(K)seed$(seed)RR.npz",
             Dict("times" => times_np, "llks" => heldout_llk_D_np),
@@ -378,9 +377,9 @@ end
 function evaluate_convergence(s, old_elbo, Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, MIN_ORDER, model, CHECK_EVERY = 10)
     if s % CHECK_EVERY == 0
         println("Iteration: ", s)
-        if model == "D"
+        if model == "omni"
             global likelihood = compute_llk_d(Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, MIN_ORDER)
-        elseif model == "normal"
+        elseif model == "semi"
             global likelihood = compute_llk(Y_counts_D, Y_indices_D, lambdas_DK, log_w_KC, Theta_IC, MIN_ORDER)
         else
             println("Invalid model")
