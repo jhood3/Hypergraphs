@@ -1,18 +1,31 @@
 include("utils.jl")
-directory = "supreme-court"
-test = false #if true, masks proportion of data as described in paper
-C = 3
-K = 6
-model = "semi" #"semi" (faster) or "omni" (slower but more flexible) 
-MIN_ORDER = 2
-MAX_ORDER = 9 #D in paper
-CONV_TOL = 1 
-MAX_ITER = 1000
-LEARNING_RATE = 1e-5
-NUM_RESTARTS = 10
-NUM_STEPS = 1 #steps of gradient ascent per iteration: set to 1 by default
-CHECK_EVERY = 10
-seed = 123
+
+println("Parsing command-line arguments...")
+
+args = get_parsed_args()
+
+println("\n--- Script Running with a Subset of Arguments ---")
+println("Model          = ", args["model"])
+println("Directory      = ", args["directory"])
+println("Learning Rate  = ", args["LEARNING_RATE"])
+println("Test Mode      = ", args["test"])
+println("Random Seed    = ", args["seed"])
+println("-------------------------------------------------")
+
+directory = args["directory"]
+test = args["test"]
+C = args["C"]
+K = args["K"]
+model = args["model"]
+MIN_ORDER = args["MIN_ORDER"]
+MAX_ORDER = args["MAX_ORDER"]
+CONV_TOL = args["CONV_TOL"]
+MAX_ITER = args["MAX_ITER"]
+LEARNING_RATE = args["LEARNING_RATE"]
+NUM_RESTARTS = args["NUM_RESTARTS"]
+NUM_STEPS = args["NUM_STEPS"]
+CHECK_EVERY = args["CHECK_EVERY"]
+seed = args["seed"]
 Random.seed!(seed) 
 
 @assert model == "semi" || model == "omni" "model must be 'semi' or 'omni'"
@@ -65,11 +78,23 @@ for i in 1:NUM_RESTARTS
     if likelihood >= maximum(log_likelihoods[1:i][isnan.(log_likelihoods[1:i]).==false]) 
         global likelihood_best, w_KC_best, init_W_best, gammas_DK_best, Theta_IC_best, times_best, phi_DK_best = likelihood, w_KC, init_W_KC, gammas_DK, Theta_IC, times, phi_DK
         if test == true
-            test_stuff(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, w_KC, MIN_ORDER, model, save_auc = false)
+            test_stuff(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, w_KC, MIN_ORDER, model)
             global heldout_llk_D_best = heldout_llk_D
         end
     end
 end
+
+
+
+# Collect the desired output
+output = Dict(
+    "w_KC" => w_KC_best,
+    "Theta_IC" => Theta_IC_best,
+    "gammas_DK" => gammas_DK_best,
+)
+
+
+println(JSON.json(output))
 
 ###---------------------------------------------------SAVING---------------------------------------------------
 println("Total Time Elapsed: ", time() - start_time_global)

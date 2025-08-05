@@ -11,7 +11,82 @@ using NPZ
 using Base.Threads
 using Distances
 using Zygote
-using Plots
+using ArgParse
+using JSON
+
+
+# Best Practice: The function is renamed to avoid name collision with the package function.
+function get_parsed_args()
+    s = ArgParseSettings(
+        #description = "A script to run a model with various hyperparameters.",
+        #epilog = "Example usage: julia your_script_name.jl --model cnn --LEARNING_RATE 1e-4"
+    )
+
+    # The '!' is a Julia convention for functions that modify their arguments (here, 's')
+    @add_arg_table! s begin
+        "--directory"
+            help = "Path to the input data directory"
+            arg_type = String
+            default = "supreme-court"
+        "--test"
+            help = "If set, runs the script in test mode (a boolean flag)"
+            action = :store_true # Standard way to handle flags. False by default.
+        "--C"
+            help = "Parameter C for the model"
+            arg_type = Int
+            default = 3
+        "--K"
+            help = "Parameter K for the model"
+            arg_type = Int
+            default = 6
+        "--model"
+            help = "Specify the model type (e.g., 'semi', 'cnn')"
+            arg_type = String
+            default = "semi"
+        "--MIN_ORDER"
+            help = "Minimum order for a model component"
+            arg_type = Int
+            default = 2
+        "--MAX_ORDER"
+            help = "Maximum order for a model component"
+            arg_type = Int
+            default = 9
+        "--CONV_TOL"
+            help = "Convergence tolerance for the optimization"
+            arg_type = Float64
+            default = 1.0
+        "--MAX_ITER"
+            help = "Maximum number of iterations"
+            arg_type = Int
+            default = 1000
+        "--LEARNING_RATE"
+            help = "Learning rate for the optimizer"
+            arg_type = Float64
+            default = 1e-5
+        "--NUM_RESTARTS"
+            help = "Number of random restarts for the optimization"
+            arg_type = Int
+            default = 10
+        "--NUM_STEPS"
+            help = "Number of steps to run"
+            arg_type = Int
+            default = 1
+        "--CHECK_EVERY"
+            help = "Frequency of checking for convergence (in iterations)"
+            arg_type = Int
+            default = 10
+        "--seed"
+            help = "Random seed for reproducibility"
+            arg_type = Int
+            default = 123
+    end
+
+
+    return parse_args(ARGS, s)
+end
+
+
+
 
 function save_params(test, w_KC_best, gammas_DK_best, Theta_IC_best, times_best, directory, model)
     if test == false
@@ -344,7 +419,7 @@ function update_theta_all(Theta_IK, Theta_IC, phi_VDK, gammas_DK, phi_DK, Y_CV, 
     return(Theta_IK, phi_VDK, phi_DK, Theta_IC)
 end
 
-function test_stuff(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, w_KC, MIN_ORDER, model, save_auc = false)
+function test_stuff(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, w_KC, MIN_ORDER, model)
     if model == "omni"
         log_pmf, auc = make_predictions_d(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, MIN_ORDER, w_KC)
     elseif model == "semi"
@@ -352,11 +427,7 @@ function test_stuff(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, w_KC
     else
         println("Invalid model")
     end
-    if save_auc == true
-        global heldout_llk_D = vcat(heldout_llk_D, auc')
-    else
-        global heldout_llk_D = vcat(heldout_llk_D, log_pmf')
-    end
+    global heldout_llk_D = vcat(heldout_llk_D, log_pmf')
     times_np = convert(Array{Float64}, times)
     heldout_llk_D_np = convert(Array{Float64}, heldout_llk_D)
     if model == "omni"
@@ -755,8 +826,14 @@ function holdout(Y_indices_D, Y_counts_D, start, V)
         n = size(Y_indices, 1)
         n_test = Int(floor(n * 0.1))
         n_test = min(n_test, 1000)
-        test_indices = rand(1:n, n_test)
-        train_indices = setdiff(1:n, test_indices)
+        if n_test > 0
+            test_indices = rand(1:n, n_test)
+            train_indices = setdiff(1:n, test_indices)
+        else
+            test_indices = []
+            train_indices = 1:n
+        end
+
         test_indices_zero = zeros(n_test, d)
         vector_of_tuples = [Tuple(Y_indices[i, :]) for i = 1:size(Y_indices, 1)]
 
