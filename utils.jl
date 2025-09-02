@@ -15,81 +15,77 @@ using ArgParse
 using JSON
 
 
-# Best Practice: The function is renamed to avoid name collision with the package function.
 function get_parsed_args()
     s = ArgParseSettings(
-        #description = "A script to run a model with various hyperparameters.",
-        #epilog = "Example usage: julia your_script_name.jl --model cnn --LEARNING_RATE 1e-4"
     )
 
-    # The '!' is a Julia convention for functions that modify their arguments (here, 's')
+
     @add_arg_table! s begin
         "--directory"
             help = "Path to the input data directory"
             arg_type = String
-            default = "supreme-court"
+            default = "DAWN"
         "--test"
-            help = "If set, runs the script in test mode (a boolean flag)"
-            action = :store_true # Standard way to handle flags. False by default.
+            help = "If set, runs the script with a test set (a boolean flag)"
+            action = :store_true 
         "--C"
-            help = "Parameter C for the model"
+            help = "C: number of classes"
             arg_type = Int
-            default = 3
+            default = 16
         "--K"
-            help = "Parameter K for the model"
+            help = "K: number of communities, K >= C"
             arg_type = Int
-            default = 6
+            default = 48
         "--model"
-            help = "Specify the model type (e.g., 'semi', 'cnn')"
+            help = "Specify the model type ('semi', 'omni')"
             arg_type = String
             default = "semi"
         "--MIN_ORDER"
-            help = "Minimum order for a model component"
+            help = "Minimum hyperedge order"
             arg_type = Int
-            default = 2
+            default = 2 #default is 2
         "--MAX_ORDER"
-            help = "Maximum order for a model component"
+            help = "Maximum hyperedge order"
             arg_type = Int
-            default = 9
+            default = 25 #default is 25
         "--CONV_TOL"
-            help = "Convergence tolerance for the optimization"
+            help = "Convergence tolerance for the change in ELBO from iteration to iteration"
             arg_type = Float64
             default = 1.0
         "--MAX_ITER"
             help = "Maximum number of iterations"
             arg_type = Int
-            default = 1000
+            default = 300
         "--LEARNING_RATE"
-            help = "Learning rate for the optimizer"
+            help = "Learning rate for gradient step to update W"
             arg_type = Float64
-            default = 1e-5
+            default = 1e-6
         "--NUM_RESTARTS"
             help = "Number of random restarts for the optimization"
             arg_type = Int
-            default = 10
+            default = 10 #default is 10
         "--NUM_STEPS"
-            help = "Number of steps to run"
+            help = "Number of steps to run gradient descent per iteration"
             arg_type = Int
-            default = 1
+            default = 1 #default is 1
         "--CHECK_EVERY"
             help = "Frequency of checking for convergence (in iterations)"
             arg_type = Int
-            default = 10
+            default = 10 #compute elbo and check for convergence every CHECK_EVERY iterations
         "--seed"
             help = "Random seed for reproducibility"
             arg_type = Int
-            default = 123
+            default = 101 #default is 101
     end
 
-
-    return parse_args(ARGS, s)
+    return parse_args(ARGS, s) #parse arguments
 end
 
 
 
 
-function save_params(test, w_KC_best, gammas_DK_best, Theta_IC_best, times_best, directory, model)
-    if test == false
+function save_params(test, w_KC_best, gammas_DK_best, Theta_IC_best, times_best, directory, model, llk)
+    if test == false #save as parameters as numpy arrays 
         w_KC_np = convert(Array{Float64}, w_KC_best)
         gammas_DK_np = convert(Array{Float64}, gammas_DK_best)
         Theta_IC_np = convert(Array{Float64}, Theta_IC_best)
@@ -98,12 +94,12 @@ function save_params(test, w_KC_best, gammas_DK_best, Theta_IC_best, times_best,
         if model == "semi"
         npzwrite(
             "results/" * directory * "/C$(C)K$(K)seed$(seed)Params.npz",
-            Dict("w_KC" => w_KC_np, "gammas_DK" => gammas_DK_np, "Theta_IC" => Theta_IC_np, "times" => times_np),
+            Dict("w_KC" => w_KC_np, "gammas_DK" => gammas_DK_np, "Theta_IC" => Theta_IC_np, "times" => times_np, "llk"=>llk),
         )
         elseif model == "omni"
             npzwrite(
                 "results/" * directory * "/C$(C)K$(K)seed$(seed)ParamsD.npz",
-                Dict("w_KC" => w_KC_np, "gammas_DK" => gammas_DK_np, "Theta_IC" => Theta_IC_np, "times" => times_np),
+                Dict("w_KC" => w_KC_np, "gammas_DK" => gammas_DK_np, "Theta_IC" => Theta_IC_np, "times" => times_np, "llk"=>llk),
             )
         else
             println("Invalid model")
@@ -111,42 +107,44 @@ function save_params(test, w_KC_best, gammas_DK_best, Theta_IC_best, times_best,
     end
 end
 
-function softmax(x, dims)
+function softmax(x, dims) #softmax function 
     exps = exp.(x .- maximum(x, dims=dims))
     return exps ./ sum(exps, dims=dims)
 end
 
 
-function allocate_all_d(Y_indices_D, Y_counts_D, gammas_DK, Tau_IK, w_KC, Theta_IC, MIN_ORDER, D)
+function allocate_all_d(Y_indices_D, Y_counts_D, gammas_DK, Tau_IK, w_KC, Theta_IC, MIN_ORDER, D) #allocate latent hyperedges to latent hyperedge counts (omni-assortative version)
     C = size(w_KC, 2)
     K = size(w_KC, 1)
     V = size(Tau_IK, 1)
     Y_CV, Y_KC, Y_DK = reset_Y(D, V, C, K)
     locker = Threads.SpinLock()
-    @threads for d = MIN_ORDER:D
+    @threads for d = MIN_ORDER:D #iterate through hyperedge orders
         Y_indices = Y_indices_D[d]
         Y_counts = Y_counts_D[d]
         gammas_K = gammas_DK[d, :]
         inds_V = inds_VD[d]
-        Y_IK, Y_IKC = allocate_K_d(Tau_IK, w_KC, Y_indices, Y_counts, gammas_K, Theta_IC)
-        Y_CV_raw = dropdims(sum(Y_IKC, dims = 2), dims=2)'
-        Y_KC_raw = dropdims(sum(Y_IKC, dims = 1), dims=1)
-        lock(locker)
-        Y_CV += Y_CV_raw
-        Y_KC += Y_KC_raw
-        Y_DK[d, :] = sum(Y_IK, dims = 1)
-        unlock(locker)
+        if length(Y_counts) > 0
+            Y_IK, Y_IKC = allocate_K_d(Tau_IK, w_KC, Y_indices, Y_counts, gammas_K, Theta_IC) #allocate to K communities and (community, class) combinations
+            Y_CV_raw = dropdims(sum(Y_IKC, dims = 2), dims=2)' #sum over communities K
+            Y_KC_raw = dropdims(sum(Y_IKC, dims = 1), dims=1) #sum over hyperedges 
+            lock(locker)
+            Y_CV += Y_CV_raw 
+            Y_KC += Y_KC_raw
+            Y_DK[d, :] = sum(Y_IK, dims = 1)
+            unlock(locker)
+        end
     end
-    return Y_CV, Y_KC, Y_DK
+    return Y_CV, Y_KC, Y_DK #return (class by node), (community by class), (node by community) latent subcounts 
 end
 
-function allocate_K_d(Tau_IK, weights_KC, Y_indices, Y_counts, gammas_K, Theta_IC)
+function allocate_K_d(Tau_IK, weights_KC, Y_indices, Y_counts, gammas_K, Theta_IC) #allocate hyperedges to communities 
     I = size(Tau_IK, 1)
     K = size(Tau_IK, 2)
     C = size(weights_KC, 2)
     D = size(Y_indices, 2)
     Y_IK = zeros(size(Y_indices, 1), K)
-    Tau_IK = max.(Tau_IK, 1e-300)
+    Tau_IK = max.(Tau_IK, 1e-50)
     for d in axes(Y_indices, 2)
         Y_IK .+= log.(Tau_IK[Y_indices[:, d], :])
     end
@@ -173,15 +171,15 @@ function allocate_K_d(Tau_IK, weights_KC, Y_indices, Y_counts, gammas_K, Theta_I
     return (Y_IK, Y_IKC)
 end
 
-function allocate_iCK(Tau_IK, weights_KC, Theta_IC, count_K, index, w_KC_d, l_w_kc_d, l_w_kc)
+function allocate_iCK(Tau_IK, weights_KC, Theta_IC, count_K, index, w_KC_d, l_w_kc_d, l_w_kc) #allocate a hyperedge to classes and communities
     D = length(index)
     C  = size(Theta_IC, 2)
     K = size(Tau_IK, 2)
-    y_dKC = zeros(D, K, C)
+    y_dKC = zeros(D, K, C) #size of hyperedge by community by class. Different expectations for each node
     @inbounds for c in 1:C
         y_dKC[:, c, c] .= count_K[c]
     end
-    if sum(count_K[(C+1):K]) > 1e-15 #otherwise not worth computational cost
+    if sum(count_K[(C+1):K]) > 1e-15 #if subcount is sufficiently large, allocate to classes. Otherwise computational cost outweighs benefit of allocation
     @views @inbounds for k in (C+1):K
         if count_K[k] > 1e-15 
             w_C = weights_KC[k, :]
@@ -191,7 +189,7 @@ function allocate_iCK(Tau_IK, weights_KC, Theta_IC, count_K, index, w_KC_d, l_w_
             @views @fastmath for d in 1:D
                 potentials_C = l_w_c .+ log.(Theta_IC[index[d], :])
                 constant = 0
-                constant_C = l_w_c_d .+ 0
+                constant_C = l_w_c_d 
                 @views for m in 1:D
                     if m != d
                         constant += log.(Tau_IK[index[m], k])
@@ -199,7 +197,7 @@ function allocate_iCK(Tau_IK, weights_KC, Theta_IC, count_K, index, w_KC_d, l_w_
                     end
                 end
                 potentials_C .+= logsubexp.(constant, constant_C)
-                y_dKC[d, k, :] = exp.(potentials_C .- logsumexp(potentials_C)) .* count_K[k]
+                y_dKC[d, k, :] = exp.(potentials_C .- logsumexp(potentials_C)) .* count_K[k] 
             end
         end
     end
@@ -207,7 +205,7 @@ function allocate_iCK(Tau_IK, weights_KC, Theta_IC, count_K, index, w_KC_d, l_w_
     return(y_dKC)
 end
 
-function update_theta_iC_d(i, Y_iC, gamma_DK, weights_KC, start, D, phi_vDK, beta)
+function update_theta_iC_d(i, Y_iC, gamma_DK, weights_KC, start, D, phi_vDK, beta) #update node-class membership matrix, node i, omni model variant
     numerator_C = Y_iC
     phi_vDC = phi_vDK[:, 1:C]
     d_val_sum = sum(gamma_DK[start:D, :] .* phi_vDK[(start-1):(D-1),:], dims=1)
@@ -222,11 +220,12 @@ function update_theta_iC_d(i, Y_iC, gamma_DK, weights_KC, start, D, phi_vDK, bet
     end
     denominators_C .+= beta
     Theta_I = numerator_C ./ denominators_C
+    Theta_I = max.(Theta_I, 0)
     return(Theta_I)
 end
 
-function update_theta_iC_D_d(
-    i,
+function update_theta_iC_D_d( #update node-class membership matrix, node i, omni model variant
+    i, 
     Tau_IK,
     Theta_IC,
     phi_VDK,
@@ -243,7 +242,7 @@ function update_theta_iC_D_d(
     old_theta = Tau_IK[i, :]
     new_theta_iC = update_theta_iC_d(i, Y_C .+ alpha, gammas_DK, weights_KC, start, size(phi_DK, 1), exp.(phi_VDK[i,:,:]), beta)
     new_theta_iC = max.(new_theta_iC, alpha)
-    # Update theta values
+    # Update Theta_IK, Theta_IC, phi_DK, phi_VDK which hold constants for updates
     new_Tau_IK = weights_KC * new_theta_iC
     Tau_IK[i, :] .= new_Tau_IK
     Theta_IC[i, :] .= new_theta_iC
@@ -253,7 +252,7 @@ function update_theta_iC_D_d(
 end
 
 
-function update_theta_all_d(Tau_IK, Theta_IC, phi_VDK, gammas_DK, phi_DK, Y_CV, w_KC, MIN_ORDER)
+function update_theta_all_d(Tau_IK, Theta_IC, phi_VDK, gammas_DK, phi_DK, Y_CV, w_KC, MIN_ORDER) #loop through nodes, updating each node's class membership vector (omni model variant)
     V = size(Tau_IK, 1)
     @views for i = 1:V
         j = min(i+1, V)
@@ -273,19 +272,19 @@ function update_theta_all_d(Tau_IK, Theta_IC, phi_VDK, gammas_DK, phi_DK, Y_CV, 
             0
         )
     end
-    Theta_IC = Theta_IC ./ sum(Theta_IC) .* V#/C
-    Theta_IK = Theta_IC * w_KC'
+    Theta_IC = Theta_IC ./ sum(Theta_IC) .* V #normalizing Theta_IC at each step helps stability in practice
+    Theta_IK = Theta_IC * w_KC' #matrix multiplication
     return(Tau_IK, phi_VDK, phi_DK, Theta_IC)
 end
 
-function compute_gradient_d(log_w_KC, Y_KC, Theta_IC, gammas_DK, start, D)
+function compute_gradient_d(log_w_KC, Y_KC, Theta_IC, gammas_DK, start, D) #use automatic differentiation to compute the gradient of the elbo w.r.t. W (omni model variant)
     return Zygote.gradient(
         w -> compute_Welbo_d(Y_KC, w, Theta_IC, gammas_DK[start:D,:], start, D),
         log_w_KC
-    )[1]
+    )[1] #return gradient 
 end
 
-function optimize_Welbo_d(
+function optimize_Welbo_d( #'optimize' by computing gradient and taking gradient step to update W
     Y_KC,
     log_w_KC,
     Theta_IC,
@@ -303,10 +302,10 @@ for step = 1:steps
     @inbounds grad_w_KC[isnan.(grad_w_KC)] .= 0
     log_w_KC[(C+1):K,:] .+= lr * grad_w_KC[(C+1):K,:]
 end
-    return log_w_KC, softmax(log_w_KC, 2)#log.(exp.(log_w_KC) .+ 1) 
+    return log_w_KC, softmax(log_w_KC, 2)#log.(exp.(log_w_KC) .+ 1) #can do softmax or softplus transformation and update
 end
 
-function compute_Welbo_d(Y_KC, log_w_KC, Theta_IC, gammas_DK, start, D)
+function compute_Welbo_d(Y_KC, log_w_KC, Theta_IC, gammas_DK, start, D) #compute the terms in elbo proportional to W (omni model)
     #w_KC = log1p.(exp.(log_w_KC))  # log(1 + exp(x)) is equivalent
     w_KC = softmax(log_w_KC, 2) #under softmax formulation
     phi_DK = compute_phi_DK_min(Theta_IC * w_KC', D)
@@ -320,10 +319,10 @@ function compute_Welbo_d(Y_KC, log_w_KC, Theta_IC, gammas_DK, start, D)
 end
 
 
-function compute_llk_d(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, start)
+function compute_llk_d(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, start) #compute log-likelihood under omni model
     C = size(Theta_IC, 2)
     #w_KC = log1p.(exp.(log_w_KC))
-    w_KC = softmax(log_w_KC, 2)
+    w_KC = softmax(log_w_KC, 2) #can do softmax or softplus transformation
     Tau_IK = Theta_IC * w_KC'
     llk = 0
     phi_DK = compute_phi_DK_min(Tau_IK, D)
@@ -336,21 +335,21 @@ function compute_llk_d(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, s
         Y_indices = Y_indices_D[d]
         rates_IK = zeros(size(Y_indices, 1), K) 
         for m = 1:size(Y_indices, 2)
-            rates_IK .+= log.(Tau_IK[Y_indices[:, m], :])# + rates_IK
+            rates_IK .+= log.(Tau_IK[Y_indices[:, m], :])
         end
         rates_IK .= exp.(rates_IK)
         for k in (C+1):K
             rates_IK[:, k] .-= dropdims(sum(rates_IK[:, 1:C] .* w_KC[k, :]'.^d, dims=2), dims=2)
         end
         rates_IK .= max.(rates_IK, 0)
-        rates_IK .= log.(rates_IK.+1e-80) .+ log.(gammas_DK[d, :])'
+        rates_IK .= log.(rates_IK.+1e-80) .+ log.(gammas_DK[d, :])' #add small constant for stability
         llk += sum(logsumexp(rates_IK, dims = 2) .* Y_counts)
     end
     println("Log-likelihood: $(llk)")
     return llk
 end
 
-function make_predictions_d(Y_indices_test_D, Y_counts_test_D, gammas_DK, Tau_IK, start, w_KC)
+function make_predictions_d(Y_indices_test_D, Y_counts_test_D, gammas_DK, Tau_IK, start, w_KC) #predict test set values, compute auc and heldout log-likelihood
     D = length(Y_indices_test_D)
     predictions = zeros(0)
     log_pmf = zeros(0)
@@ -394,7 +393,7 @@ function make_predictions_d(Y_indices_test_D, Y_counts_test_D, gammas_DK, Tau_IK
     return log_pmfs, aucs
 end
 
-function update_theta_all(Theta_IK, Theta_IC, phi_VDK, gammas_DK, phi_DK, Y_CV, w_KC, MIN_ORDER)
+function update_theta_all(Theta_IK, Theta_IC, phi_VDK, gammas_DK, phi_DK, Y_CV, w_KC, MIN_ORDER) #update node-class membership Theta_IC (semi model)
     V = size(Theta_IK, 1)
     @views for i = 1:V
         j = min(i+1, V)
@@ -414,12 +413,12 @@ function update_theta_all(Theta_IK, Theta_IC, phi_VDK, gammas_DK, phi_DK, Y_CV, 
             0,
         )
     end
-    Theta_IC = Theta_IC ./ sum(Theta_IC) .* V#/C
-    Theta_IK = Theta_IC * w_KC'
+    Theta_IC = Theta_IC ./ sum(Theta_IC) .* V #normalizing helps with numerical stability in practice
+    Theta_IK = Theta_IC * w_KC' #matrix multiplication to get node-community matrix
     return(Theta_IK, phi_VDK, phi_DK, Theta_IC)
 end
 
-function test_stuff(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, w_KC, MIN_ORDER, model)
+function test_stuff(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, w_KC, MIN_ORDER, model) #make predictions, compute heldout log-likelihood and auc, and save llks/times 
     if model == "omni"
         log_pmf, auc = make_predictions_d(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, MIN_ORDER, w_KC)
     elseif model == "semi"
@@ -445,13 +444,13 @@ function test_stuff(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, w_KC
     end
 end
 
-function evaluate_convergence(s, old_elbo, Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, MIN_ORDER, model, CHECK_EVERY = 10)
+function evaluate_convergence(s, old_elbo, Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, MIN_ORDER, model, CHECK_EVERY = 10) #evaluate convergence by computing log-likelihood and checking if sufficient change
     if s % CHECK_EVERY == 0
         println("Iteration: ", s)
         if model == "omni"
-            global likelihood = compute_llk_d(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, MIN_ORDER)
+            global likelihood = compute_llk_d(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, MIN_ORDER) #omni model variant
         elseif model == "semi"
-            global likelihood = compute_llk(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, MIN_ORDER)
+            global likelihood = compute_llk(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, MIN_ORDER) #semi model variant
         else
             println("Invalid model")
         end
@@ -463,27 +462,28 @@ end
 
 
 
-function reset_Y(D, V, C, K)
+function reset_Y(D, V, C, K) # set latent subcounts Y_CV, Y_KC, Y_DK to zero
     Y_CV = zeros(C,V)
     Y_KC = zeros(K, C)
     Y_DK = zeros(D, K)
     return Y_CV, Y_KC, Y_DK
 end
 
-function init(K, C, D, V)
+function init(K, C, D, V) #initialize W, Theta_IC, etc. 
     w_KC, log_w_KC = init_W(K, C) 
     init_W_KC = copy(w_KC)
     log_w_KC = log.(w_KC)
     gammas_DK = ones(D, K)
+    if model == "omni" #if omni-assortative model, encourage disassortativity (area where the model has benefit over the semi-assortative model)
+        gammas_DK[:,1:C] .= 1e-1
+    end
     Theta_IC, Theta_IK = init_membership(V, C, K, D, w_KC)
-    Theta_IC = Theta_IC ./ sum(Theta_IC) .* V/C
+    Theta_IC = Theta_IC ./ sum(Theta_IC) .* V#/C
     Theta_IK, phi_DK, phi_VDK = update_params(Theta_IC, w_KC, D)
     return w_KC, init_W_KC, log_w_KC, gammas_DK, Theta_IC, Theta_IK, phi_VDK, phi_DK
 end
 
-function load_data(directory, MAX_ORDER = 25, MIN_ORDER = 2, test = false)
-    #data = npzread("data/" * directory * "/edges$(MIN_ORDER).npz")
-    #data = npzread("data/" * directory * "/edges3ce.npz")
+function load_data(directory, MAX_ORDER = 25, MIN_ORDER = 2,test =false, ablate=false) #load hyperedge data. Data should be stored in an npz file with an NxD array of hyperedges and an array of counts of length N, the number of hyperedges
     data = npzread("data/" * directory * "/edges.npz")
     Y_indices_raw = data["edges"]
     Y_counts_raw = round.(data["counts"])
@@ -509,9 +509,22 @@ function load_data(directory, MAX_ORDER = 25, MIN_ORDER = 2, test = false)
         end
         Y_indices_D[d] = Y_indices_raw[indices, 1:d]
         Y_counts_D[d] = Y_counts_raw[indices]
+        len_Y = length(Y_counts_D[d])
+        if ablate 
+            if len_Y > 0
+                inds = rand(Uniform(0,1), len_Y) .> 0.1
+                Y_counts = Y_counts_D[d]
+                Y_indices = Y_indices_D[d]
+                Y_counts = Y_counts[inds]
+                println(length(Y_counts))
+                Y_indices = Y_indices[inds,:]
+                Y_counts_D[d] = Y_counts
+                Y_indices_D[d] = Y_indices
+            end
+        end
     end
 
-    if test == true
+    if test == true #create test set
         Y_indices_test_D, Y_counts_test_D, Y_indices_train_D, Y_counts_train_D =
             holdout(Y_indices_D, Y_counts_D, MIN_ORDER, V)
         Y_indices_D = Y_indices_train_D
@@ -519,7 +532,7 @@ function load_data(directory, MAX_ORDER = 25, MIN_ORDER = 2, test = false)
     end
 
 
-    for d = MIN_ORDER:D
+    for d = MIN_ORDER:D #keep track of which nodes appear in which indices to avoid search during training 
         Y_indices = Y_indices_D[d]
         inds_V = []
         for i = 1:V
@@ -527,7 +540,7 @@ function load_data(directory, MAX_ORDER = 25, MIN_ORDER = 2, test = false)
         end
         inds_VD[d] = inds_V
     end
-    if test == true
+    if test == true 
         return V, D, Y_indices_D, Y_counts_D, Y_indices_test_D, Y_counts_test_D, inds_VD
     else
         return V, D, Y_indices_D, Y_counts_D, inds_VD
@@ -535,7 +548,7 @@ function load_data(directory, MAX_ORDER = 25, MIN_ORDER = 2, test = false)
 end
 
 
-function update_params(Theta_IC, w_KC, D)
+function update_params(Theta_IC, w_KC, D) #update phi_DK, Theta_IK, phi_VDK once w_KC or Theta_IC update (as the values change)
     Theta_IK = Theta_IC * w_KC'
     phi_DK, phi_VDK = compute_phi_DK(Theta_IK, D)
     phi_DK = log.(phi_DK)
@@ -544,30 +557,30 @@ function update_params(Theta_IC, w_KC, D)
 end
 
 
-function allocate_all(Y_indices_D, Y_counts_D, gammas_DK, Theta_IK, w_KC, Theta_IC, MIN_ORDER, D)
-    C = size(w_KC, 2)
+function allocate_all(Y_indices_D, Y_counts_D, gammas_DK, Theta_IK, w_KC, Theta_IC, MIN_ORDER, D) #allocate the hyperedge counts to latent class and latent community subcounts (semi model)
+    C = size(w_KC, 2) 
     K = size(w_KC, 1)
     V = size(Theta_IK, 1)
-    Y_CV, Y_KC, Y_DK = reset_Y(D, V, C, K)
+    Y_CV, Y_KC, Y_DK = reset_Y(D, V, C, K) #set latent subcounts to zero
     locker = Threads.SpinLock()
     for d = MIN_ORDER:D
         Y_indices = Y_indices_D[d]
         Y_counts = Y_counts_D[d]
         gammas_K = gammas_DK[d, :]
         inds_V = inds_VD[d]
-        Y_IK = allocate(Y_indices, Y_counts, gammas_K, Theta_IK)
-        Y_CV_raw, Y_KC_raw = reallocate(Y_IK', inds_V, w_KC, Theta_IC)
+        Y_IK = allocate(Y_indices, Y_counts, gammas_K, Theta_IK) #allocate counts to communities 
+        Y_CV_raw, Y_KC_raw = reallocate(Y_IK', inds_V, w_KC, Theta_IC) #allocate community counts to classes and node subcounts 
         lock(locker)
         Y_CV += Y_CV_raw
         Y_KC += Y_KC_raw
-        Y_DK[d, :] = sum(Y_IK, dims = 1)
+        Y_DK[d, :] = sum(Y_IK, dims = 1) #hyperedge order by community subcounts
         unlock(locker)
     end
     return Y_CV, Y_KC, Y_DK
 end
 
 
-function init_W(K, C)
+function init_W(K, C) #initialize W_KC with upper diagonal structure
     w_KC = zeros(K, C)
     for c = 1:C
         w_KC[c, c] += 1
@@ -584,7 +597,7 @@ function init_W(K, C)
 end
 
 
-function allocate(Y_indices, Y_counts, gammas_K, Theta_IK)
+function allocate(Y_indices, Y_counts, gammas_K, Theta_IK) #allocate to K communities
     I = size(Theta_IK, 1)
     K = size(Theta_IK, 2)
     Y_IK = zeros(size(Y_indices, 1), K) .+ log.(gammas_K)'
@@ -593,10 +606,10 @@ function allocate(Y_indices, Y_counts, gammas_K, Theta_IK)
     end
     Y_IK = exp.(Y_IK .- logsumexp(Y_IK, dims = 2)) .* (Y_counts)
     @assert sum(Y_IK) ≈ sum(Y_counts) println(sum(Y_IK), sum(Y_counts))
-    return (Y_IK)
+    return (Y_IK) #of size (num hyperedges by K)
 end
 
-function gradient(Y_KC, Theta_IC, gammas_DK, start, log_w_KC)
+function gradient(Y_KC, Theta_IC, gammas_DK, start, log_w_KC) #take gradient of elbo w.r.t. W_KC
     Zygote.gradient(
         w -> compute_Welbo(Y_KC, w, Theta_IC, gammas_DK[start:D,:], start),
         log_w_KC,
@@ -688,7 +701,6 @@ function compute_phi_DK_min(input_mat::Array{Float64}, D::Int)
 end
 
 
-
 function compute_llk(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, start)
     w_KC = softmax(log_w_KC, 2)#log1p.(exp.(log_w_KC))
     Theta_IK = Theta_IC * w_KC'
@@ -709,7 +721,7 @@ function compute_llk(Y_counts_D, Y_indices_D, gammas_DK, log_w_KC, Theta_IC, sta
 end
 
 
-function reallocate(Y_KI, inds_V, weights_KC, Theta_IC)
+function reallocate(Y_KI, inds_V, weights_KC, Theta_IC) #allocate hyperedge-community counts to classes
     V = length(inds_V)
     K = size(Y_KI, 1)
     C = size(Theta_IC, 2)
@@ -720,7 +732,7 @@ function reallocate(Y_KI, inds_V, weights_KC, Theta_IC)
         y_ik = dropdims(sum(yi, dims = 2), dims = 2)
         weight_KC = weights_KC .* Theta_IC[i, :]'
         col_sums = sum(weight_KC, dims = 2)
-        col_sums[col_sums.==0] .= 1e-100 #stability
+        col_sums[col_sums.==0] .= 1e-100 #for numerical stability and to avoid division by 0
         weight_KC ./= col_sums
         Y_CV[:, i] .= transpose(weight_KC) * y_ik
         Y_KC .+= sum(yi, dims = 2) .* weight_KC
@@ -728,7 +740,7 @@ function reallocate(Y_KI, inds_V, weights_KC, Theta_IC)
     return (Y_CV, Y_KC)
 end
 
-function init_membership(V, C, K, D, weights_KC)
+function init_membership(V, C, K, D, weights_KC) #initialize Theta_IC, community membership matrix so that each node has same starting value
     Theta_IC = zeros(V, C)
     Theta_IK = zeros(V, K)
     phi_DK = zeros(D, K)
@@ -768,7 +780,7 @@ end
 
 
 
-function update_theta_iC_D(
+function update_theta_iC_D( #update node i's class membership vector and corresponding caching terms
     i,
     Theta_IK,
     Theta_IC,
@@ -793,7 +805,7 @@ function update_theta_iC_D(
 
     # Compute denominators and new_theta_iC
     denominators = d_val_sum * weights_KC
-    new_theta_iC = (Y_C .+ alpha) ./ (denominators' .+ beta)  # shrinkage prior
+    new_theta_iC = (Y_C .+ alpha) ./ (denominators' .+ beta)  #new (unnormalized) vector. alpha, beta for potential shrinkage gamma prior 
     # Update theta values
     new_theta_iK = weights_KC * new_theta_iC
     Theta_IK[i, :] .= new_theta_iK
@@ -807,7 +819,7 @@ function update_theta_iC_D(
 end
 
 
-function holdout(Y_indices_D, Y_counts_D, start, V)
+function holdout(Y_indices_D, Y_counts_D, start, V) #create holdout set that iterates through each hyperedge order and holds out a random of min(0.1*N, 1000) hyperedges of that order. For model evaluation
     Y_indices_test_D = []
     Y_counts_test_D = []
     Y_indices_train_D = []
@@ -855,7 +867,7 @@ function holdout(Y_indices_D, Y_counts_D, start, V)
     return Y_indices_test_D, Y_counts_test_D, Y_indices_train_D, Y_counts_train_D
 end
 
-function make_predictions(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, start)
+function make_predictions(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK, start) #predict heldout set and compute heldout log-likelihood, auc
     D = length(Y_indices_D)
     predictions = zeros(0)
     log_pmf = zeros(0)
@@ -871,18 +883,13 @@ function make_predictions(Y_indices_test_D, Y_counts_test_D, gammas_DK, Theta_IK
         for m = 1:d
             rates_IK += log.(Theta_IK[Y_indices[:, m], :])
         end
-        #if length(Y_counts) > 0
-        #println(maximum(exp.(rates_IK)))
-        #end
         #if nan, set to -Inf
         rates_IK[isnan.(rates_IK)] .= -Inf
         predictions_d = sum(exp.(rates_IK), dims = 2)
         prob_greater_0_d = 1 .- exp.(-predictions_d)
-        #println(predictions_d)
         #get first half of vector of prob_greater_0_d
         first_half_d = predictions_d[1:Int(round(length(prob_greater_0_d) / 2))]
         second_half_d = predictions_d[Int(round(length(prob_greater_0_d) / 2))+1:end]
-        #auc = (sum(first_half > second_half) + 0.5*sum(first_half .== second_half)) / length(prob_greater_0_d)*2
         log_poisson = logpdf.(Poisson.(predictions_d .+ 1e-300), Y_counts)
         predictions = vcat(predictions, predictions_d)
         log_pmfs[d-start+1] = mean(log_poisson)
@@ -900,7 +907,7 @@ end
 
 
 
-function update_phi_DK(old, new, phi_DK, i, phi_VDK)
+function update_phi_DK(old, new, phi_DK, i, phi_VDK) #compute phi_DK, as derived in the paper 
     phi_DK[1, :] .= logsubexp.(phi_DK[1, :], log.(old))
     phi_DK[1, :] .= logsumexp.(phi_DK[1, :], log.(new))
     @views for d = 2:D
@@ -910,7 +917,7 @@ function update_phi_DK(old, new, phi_DK, i, phi_VDK)
     return (phi_DK)
 end
 
-function update_phi_VDK(theta_k, phi_DK, phi_VDK, j)
+function update_phi_VDK(theta_k, phi_DK, phi_VDK, j) #compute phi_VDK, as derived in the paper
     phi_VDK[j, 1, :] .= logsubexp.(phi_DK[1, :], log.(theta_k))
     @views for d = 2:D
         phi_VDK[j, d, :] .= logsubexp.(phi_DK[d, :], log.(theta_k) .+ phi_VDK[j, d-1, :])
@@ -919,7 +926,7 @@ function update_phi_VDK(theta_k, phi_DK, phi_VDK, j)
 end
 
 
-function update_theta_iC_init(i, Theta_IK, Theta_IC, weights_KC)
+function update_theta_iC_init(i, Theta_IK, Theta_IC, weights_KC) #initialize each node's class membership vector to random Dirichlet 
     C = size(Theta_IC, 2)
     new_theta_iC = rand(Dirichlet(ones(C)))
     new_theta_iK = weights_KC * new_theta_iC
@@ -930,18 +937,18 @@ end
 
 
 
-function find_matching_rows(Y_IK, i_prime)
+function find_matching_rows(Y_IK, i_prime) #helper function for construction of inds_V
     matching_rows = [any(x -> x == i_prime, row) for row in eachrow(Y_IK)]
     true_vals = findall(matching_rows)
     return true_vals
 end
 
-function update_gamma_DK(gammas_DK, y_DK, phi_DK, alpha = 1e-2, beta = 1e-2)
+function update_gamma_DK(gammas_DK, y_DK, phi_DK, alpha = 1e-2, beta = 1e-2) #update gamma_DK parameters (semi model)
     gammas_DK = (y_DK .+ alpha) ./ (exp.(phi_DK) .+ beta)
     return (gammas_DK)
 end
 
-function update_gamma_DK_d(Y_DK, phi_DK, start, weights_KC, alpha, beta)
+function update_gamma_DK_d(Y_DK, phi_DK, start, weights_KC, alpha, beta) #update gamma_DK parameters (omni model)
     D = size(phi_DK, 1)
     K = size(phi_DK, 2)
     e_phi_DK = exp.(phi_DK)
